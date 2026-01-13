@@ -37,7 +37,7 @@ def translate(image: np.ndarray, shift_x: int, shift_y: int) -> np.ndarray:
     return cv2.warpAffine(image, matrix, (w, h), borderMode=cv2.BORDER_REFLECT_101)
 
 
-def perspective(image: np.ndarray, ratio: float = 0.08) -> np.ndarray:
+def perspective(image: np.ndarray, ratio: float = 0.06) -> np.ndarray:
     h, w = image.shape[:2]
     src = np.float32([[0, 0], [w - 1, 0], [0, h - 1], [w - 1, h - 1]])
     offset_x = ratio * w
@@ -83,24 +83,49 @@ def random_shadow(image: np.ndarray, opacity: float = 0.4) -> np.ndarray:
     return (image.astype(np.float32) * (1 - alpha)).astype(np.uint8)
 
 
+def pad_image(image: np.ndarray, ratio: float) -> np.ndarray:
+    if ratio <= 0:
+        return image
+    h, w = image.shape[:2]
+    pad_h = max(1, int(h * ratio))
+    pad_w = max(1, int(w * ratio))
+    return cv2.copyMakeBorder(
+        image,
+        top=pad_h,
+        bottom=pad_h,
+        left=pad_w,
+        right=pad_w,
+        borderType=cv2.BORDER_REFLECT_101,
+    )
+
+
+def center_crop(image: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
+    h, w = image.shape[:2]
+    if h <= target_h or w <= target_w:
+        return image[:target_h, :target_w]
+    start_y = (h - target_h) // 2
+    start_x = (w - target_w) // 2
+    return image[start_y : start_y + target_h, start_x : start_x + target_w]
+
+
 def augment(image: np.ndarray) -> np.ndarray:
     result = image.copy()
-    if random.random() < 0.7:
-        result = rotate(result, random.uniform(-35, 35))
     if random.random() < 0.6:
-        shift_x = random.randint(-int(0.07 * result.shape[1]), int(0.07 * result.shape[1]))
-        shift_y = random.randint(-int(0.07 * result.shape[0]), int(0.07 * result.shape[0]))
+        result = rotate(result, random.uniform(-28, 28))
+    if random.random() < 0.5:
+        shift_x = random.randint(-int(0.06 * result.shape[1]), int(0.06 * result.shape[1]))
+        shift_y = random.randint(-int(0.06 * result.shape[0]), int(0.06 * result.shape[0]))
         result = translate(result, shift_x, shift_y)
-    if random.random() < 0.5:
-        result = perspective(result)
-    if random.random() < 0.6:
-        result = adjust_gamma(result, random.uniform(0.6, 1.6))
-    if random.random() < 0.5:
-        result = blur(result)
-    if random.random() < 0.4:
-        result = add_noise(result, std=random.uniform(5, 20))
     if random.random() < 0.3:
-        result = random_shadow(result, opacity=random.uniform(0.25, 0.55))
+        result = perspective(result, ratio=0.06)
+    if random.random() < 0.5:
+        result = adjust_gamma(result, random.uniform(0.75, 1.35))
+    if random.random() < 0.35:
+        result = blur(result)
+    if random.random() < 0.25:
+        result = add_noise(result, std=random.uniform(4, 12))
+    if random.random() < 0.2:
+        result = random_shadow(result, opacity=random.uniform(0.18, 0.4))
     return result
 
 
@@ -109,6 +134,8 @@ def augment_file(image_path: Path, output_dir: Path, copies: int) -> List[Path]:
     if image is None:
         return []
     image = ensure_color(image)
+    h, w = image.shape[:2]
+    image = pad_image(image, ratio=0.05)
     saved = []
     cv2.imwrite(str(output_dir / image_path.name), image)
     saved.append(output_dir / image_path.name)
@@ -116,6 +143,7 @@ def augment_file(image_path: Path, output_dir: Path, copies: int) -> List[Path]:
     suffix = image_path.suffix
     for idx in range(1, copies + 1):
         aug = augment(image)
+        aug = center_crop(aug, h, w)
         output_path = output_dir / f"{stem}_aug{idx:02d}{suffix}"
         cv2.imwrite(str(output_path), aug)
         saved.append(output_path)

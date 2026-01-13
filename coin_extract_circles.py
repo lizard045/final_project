@@ -43,6 +43,53 @@ def parse_args() -> argparse.Namespace:
         default=0.06,
         help="合併多輪偵測的重疊圓，圓心距離低於此比例(乘以短邊)視為同一顆硬幣。",
     )
+    parser.add_argument(
+        "--pre-scale",
+        type=float,
+        default=1.0,
+        help="偵測前先對影像等比例放大，>1 會放大以強化小幣邊緣，預設 1.0 (不縮放)",
+    )
+    parser.add_argument(
+        "--two-pass",
+        action="store_true",
+        help="啟用雙階段圓檢：先小幣、再中幣，增加 1/5 元成功率",
+    )
+    parser.add_argument(
+        "--pass1-min-radius-ratio",
+        type=float,
+        default=0.06,
+        help="雙階段第 1 輪的半徑下限比例 (小幣)",
+    )
+    parser.add_argument(
+        "--pass1-max-radius-ratio",
+        type=float,
+        default=0.18,
+        help="雙階段第 1 輪的半徑上限比例 (小幣)",
+    )
+    parser.add_argument(
+        "--pass1-param2",
+        type=float,
+        default=30,
+        help="雙階段第 1 輪的圓檢門檻 param2，越低越寬鬆",
+    )
+    parser.add_argument(
+        "--pass2-min-radius-ratio",
+        type=float,
+        default=0.08,
+        help="雙階段第 2 輪的半徑下限比例 (中幣)",
+    )
+    parser.add_argument(
+        "--pass2-max-radius-ratio",
+        type=float,
+        default=0.24,
+        help="雙階段第 2 輪的半徑上限比例 (中幣)",
+    )
+    parser.add_argument(
+        "--pass2-param2",
+        type=float,
+        default=34,
+        help="雙階段第 2 輪的圓檢門檻 param2，越低越寬鬆",
+    )
     return parser.parse_args()
 
 
@@ -107,24 +154,40 @@ def extract_coins_from_image(
     param2_scan: Sequence[float] | None,
     dedup_dist_ratio: float,
     crop_scale: float,
+    pre_scale: float,
+    two_pass: bool,
+    pass1_min_radius_ratio: float,
+    pass1_max_radius_ratio: float,
+    pass1_param2: float,
+    pass2_min_radius_ratio: float,
+    pass2_max_radius_ratio: float,
+    pass2_param2: float,
 ) -> int:
     image = cv2.imread(str(image_path))
     if image is None:
         print(f"跳過無法讀取的影像: {image_path}")
         return 0
     image = ensure_color(image)
+    if pre_scale > 0 and pre_scale != 1.0:
+        image = cv2.resize(image, None, fx=pre_scale, fy=pre_scale, interpolation=cv2.INTER_LINEAR)
     processed = preprocess_for_circles(image, median_ksize, use_clahe)
-    param2_values: Iterable[float] = param2_scan if param2_scan else [param2]
+    detection_runs: List[Tuple[float, float, float]] = []
+    if two_pass:
+        detection_runs.append((pass1_param2, pass1_min_radius_ratio, pass1_max_radius_ratio))
+        detection_runs.append((pass2_param2, pass2_min_radius_ratio, pass2_max_radius_ratio))
+    else:
+        for p2 in (param2_scan if param2_scan else [param2]):
+            detection_runs.append((p2, min_radius_ratio, max_radius_ratio))
     all_circles: List[Tuple[int, int, int]] = []
-    for p2 in param2_values:
+    for run_param2, run_min_r, run_max_r in detection_runs:
         circles = detect_coins(
             processed,
             dp=dp,
             min_dist_ratio=min_dist_ratio,
             param1=param1,
-            param2=p2,
-            min_radius_ratio=min_radius_ratio,
-            max_radius_ratio=max_radius_ratio,
+            param2=run_param2,
+            min_radius_ratio=run_min_r,
+            max_radius_ratio=run_max_r,
         )
         all_circles.extend(circles)
     circles = dedup_circles(all_circles, image.shape, dedup_dist_ratio)
@@ -154,6 +217,14 @@ def extract_dataset(
     param2_scan: Sequence[float] | None,
     dedup_dist_ratio: float,
     crop_scale: float,
+    pre_scale: float,
+    two_pass: bool,
+    pass1_min_radius_ratio: float,
+    pass1_max_radius_ratio: float,
+    pass1_param2: float,
+    pass2_min_radius_ratio: float,
+    pass2_max_radius_ratio: float,
+    pass2_param2: float,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     image_paths: List[Path] = list(list_image_files(input_dir))
@@ -177,6 +248,14 @@ def extract_dataset(
             param2_scan,
             dedup_dist_ratio,
             crop_scale,
+            pre_scale,
+            two_pass,
+            pass1_min_radius_ratio,
+            pass1_max_radius_ratio,
+            pass1_param2,
+            pass2_min_radius_ratio,
+            pass2_max_radius_ratio,
+            pass2_param2,
         )
         total_saved += saved
         print(f"{image_path.name}: 擷取 {saved} 張")
@@ -200,6 +279,14 @@ def main() -> None:
         param2_scan=args.param2_scan,
         dedup_dist_ratio=args.dedup_dist_ratio,
         crop_scale=args.crop_scale,
+        pre_scale=args.pre_scale,
+        two_pass=args.two_pass,
+        pass1_min_radius_ratio=args.pass1_min_radius_ratio,
+        pass1_max_radius_ratio=args.pass1_max_radius_ratio,
+        pass1_param2=args.pass1_param2,
+        pass2_min_radius_ratio=args.pass2_min_radius_ratio,
+        pass2_max_radius_ratio=args.pass2_max_radius_ratio,
+        pass2_param2=args.pass2_param2,
     )
 
 

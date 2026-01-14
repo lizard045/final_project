@@ -13,17 +13,17 @@ pip install opencv-python numpy scikit-image scikit-learn joblib
 ```
 ## 執行docker環境應用GPU
 docker run -it --rm --gpus all -u root -v "C:/Users/snowy/OneDrive/桌面/Lizard/project/Coin_Recognisably/final_project:/workspace" -w /workspace rapidsai/base:23.10-cuda11.8-py3.10 bash
-
+## 安裝套件
 pip install "numpy<1.25" "scikit-learn<1.4" "scikit-image<0.20" joblib "opencv-python<4.8"
-###
+apt-get update
+apt-get install -y libgl1 libglib2.0-0
+## 套件細節
 numpy 1.24.x
 scikit-learn 1.3.x
 scikit-image 0.19.x
 cupy-cuda11x 12.x
 joblib 1.3.x
-apt-get update
-apt-get install -y libgl1 libglib2.0-0
-###
+
 
 > 若使用 Windows PowerShell，可改成 `python -m pip install ...` 以避免多個 Python 版本衝突。
 
@@ -67,7 +67,7 @@ final_project/
 使用 OpenCV 的 Hough Circle Transform 從整張影像擷取硬幣並存成個別小圖：
 ```bash
 python coin_extract_circles.py ^
-  --input-dir "final_project/錢幣預測試資料庫" ^
+  --input-dir "final_project/coin_datas" ^
   --output-dir "final_project/cropped_coins" ^
   --param2 38 ^
   --min-radius-ratio 0.07 ^

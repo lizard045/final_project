@@ -2,7 +2,7 @@ import argparse
 import random
 from collections import Counter
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Sequence, Tuple, Union
 
 import cv2
 import joblib
@@ -332,6 +332,7 @@ def dedup_circles(
     min_dim = min(image_shape[:2])
     dist_thresh = max(1, int(min_dim * dist_ratio))
     kept: List[Tuple[int, int, int]] = []
+    # HoughCircles 回傳的順序通常依據 accumulator 投票數 (信心度)，所以保留前面的通常較準
     for cx, cy, r in circles:
         is_dup = False
         for kx, ky, kr in kept:
@@ -346,15 +347,18 @@ def dedup_circles(
 def detect_coins(
     image: np.ndarray,
     dp: float = 1.2,
-    min_dist_ratio: float = 0.12,
+    min_dist_ratio: float = 0.06,  # [修改] 縮小距離限制，避免漏掉相鄰硬幣
     param1: float = 120,
-    param2: float = 36,
-    min_radius_ratio: float = 0.06,
+    param2: Union[float, Sequence[float]] = (50, 35, 20),  # [修改] 預設為多重掃描
+    min_radius_ratio: float = 0.05,  # [修改] 稍微放寬半徑下限
     max_radius_ratio: float = 0.40,
-    median_ksize: int = 3,
-    use_clahe: bool = False,
+    median_ksize: int = 5,  # [修改] 加大模糊核以減少噪點
+    use_clahe: bool = True,  # [修改] 預設啟用 CLAHE 增強對比
 ) -> List[Tuple[int, int, int]]:
+    
     bgr = ensure_color(image)
+    
+    # [新增] 預處理：CLAHE 與 模糊
     if use_clahe:
         lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
@@ -362,27 +366,47 @@ def detect_coins(
         l = clahe.apply(l)
         lab = cv2.merge((l, a, b))
         bgr = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    
     if median_ksize and median_ksize % 2 == 1:
         gray = cv2.medianBlur(gray, median_ksize)
+    
+    # 高斯模糊進一步降噪
     gray = cv2.GaussianBlur(gray, (9, 9), 2)
+    
     min_dim = min(image.shape[:2])
-    min_dist = max(20, int(min_dim * min_dist_ratio))
+    min_dist = max(15, int(min_dim * min_dist_ratio))
     min_radius = int(min_dim * min_radius_ratio)
     max_radius = int(min_dim * max_radius_ratio)
-    circles = cv2.HoughCircles(
-        gray,
-        cv2.HOUGH_GRADIENT,
-        dp=dp,
-        minDist=min_dist,
-        param1=param1,
-        param2=param2,
-        minRadius=min_radius,
-        maxRadius=max_radius,
-    )
-    if circles is None:
-        return []
-    return [(int(x), int(y), int(r)) for x, y, r in circles[0]]
+    
+    # [新增] 參數標準化：確保 param2 是列表
+    if isinstance(param2, (float, int)):
+        param2_list = [float(param2)]
+    else:
+        param2_list = list(param2)
+        
+    all_circles = []
+    
+    # [新增] 多重掃描迴圈
+    for p2 in param2_list:
+        circles = cv2.HoughCircles(
+            gray,
+            cv2.HOUGH_GRADIENT,
+            dp=dp,
+            minDist=min_dist,
+            param1=param1,
+            param2=p2,
+            minRadius=min_radius,
+            maxRadius=max_radius,
+        )
+        if circles is not None:
+            # 轉換為整數並加入列表
+            detected = [(int(x), int(y), int(r)) for x, y, r in circles[0]]
+            all_circles.extend(detected)
+            
+    # 注意：這裡只回傳所有掃描到的圓，去重工作交給外部或下一步的 dedup_circles
+    return all_circles
 
 
 def crop_coin(image: np.ndarray, circle: Tuple[int, int, int], scale: float = 1.0) -> np.ndarray:
@@ -408,16 +432,23 @@ def count_coins(
         if image is None:
             continue
         image = ensure_color(image)
+        
+        # [修改] 直接呼叫 detect_coins，現在它內部會自動執行多重掃描 + CLAHE
         circles = detect_coins(image)
+        
+        # 第一次去重：合併多重掃描的結果
         circles = dedup_circles(circles, image.shape, dist_ratio=DEDUP_DIST_RATIO)
+        
+        # 若圓太多 (可能是雜訊)，嘗試更激進的去重或半徑過濾
         if len(circles) > DEDUP_HEAVY_THRESHOLD:
             circles = dedup_circles(circles, image.shape, dist_ratio=DEDUP_DIST_RATIO_HEAVY)
             if circles:
                 radii = np.asarray([r for _, _, r in circles])
                 median_r = np.median(radii)
-                lower = int(max(1, 0.7 * median_r))
-                upper = int(1.4 * median_r)
+                lower = int(max(1, 0.65 * median_r))  # [微調] 稍微放寬下限
+                upper = int(1.45 * median_r)          # [微調] 稍微放寬上限
                 circles = [(x, y, r) for x, y, r in circles if lower <= r <= upper]
+                
         coin_counter: Counter[str] = Counter()
         for circle in circles:
             crop = crop_coin(image, circle, scale=CROP_SCALE_INFERENCE)

@@ -26,22 +26,20 @@ RANDOM_SEED = 42
 LBP_POINTS = 24
 LBP_RADIUS = 3
 LBP_BINS = LBP_POINTS + 2
-DEDUP_DIST_RATIO = 0.10
-DEDUP_DIST_RATIO_HEAVY = 0.20
-DEDUP_HEAVY_THRESHOLD = 20
+# [修正] 去重比例改小，避免殺掉相鄰硬幣 (0.03 約為圖像短邊的 3%)
+DEDUP_DIST_RATIO = 0.03      
+DEDUP_DIST_RATIO_HEAVY = 0.06 
+DEDUP_HEAVY_THRESHOLD = 30
 CROP_SCALE_INFERENCE = 1.10
 
 
 def to_numpy(array) -> np.ndarray:
-    """將可能來自 GPU 的陣列轉為 numpy，避免後續報表失敗。"""
     if hasattr(array, "get"):
         return np.asarray(array.get())
     return np.asarray(array)
 
 
 class CuMLPredictWrapper:
-    """包一層，確保 cuML predict 轉成 numpy，方便 sklearn 報表與序列化。"""
-
     def __init__(self, estimator):
         self.estimator = estimator
 
@@ -155,9 +153,9 @@ def augment_coin(image: np.ndarray, count: int) -> List[np.ndarray]:
         if random.random() < 0.5:
             variant = scale_image(variant, random.uniform(0.9, 1.12))
         if random.random() < 0.45:
-            shift_x = random.randint(-int(0.06 * variant.shape[1]), int(0.06 * variant.shape[1]))
-            shift_y = random.randint(-int(0.06 * variant.shape[0]), int(0.06 * variant.shape[0]))
-            variant = translate_image(variant, shift_x, shift_y)
+            variant = translate_image(variant, 
+                random.randint(-int(0.06 * variant.shape[1]), int(0.06 * variant.shape[1])), 
+                random.randint(-int(0.06 * variant.shape[0]), int(0.06 * variant.shape[0])))
         if random.random() < 0.3:
             variant = perspective_transform(variant, max_shift_ratio=0.06)
         if random.random() < 0.5:
@@ -194,11 +192,7 @@ def extract_features(gray_image: np.ndarray) -> np.ndarray:
     return np.concatenate([hog_features, hist])
 
 
-def build_dataset(
-    train_dir: Path,
-    target_size: Tuple[int, int],
-    augmentations_per_image: int,
-) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+def build_dataset(train_dir: Path, target_size: Tuple[int, int], augmentations_per_image: int) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     random.seed(RANDOM_SEED)
     np.random.seed(RANDOM_SEED)
     images = []
@@ -211,8 +205,7 @@ def build_dataset(
         image_list = list(list_image_files(class_dir))
         for image_path in tqdm(image_list, desc=f"載入 {class_name}", unit="img"):
             image = cv2.imread(str(image_path))
-            if image is None:
-                continue
+            if image is None: continue
             base = ensure_color(image)
             gray = preprocess_image(base, target_size)
             images.append(extract_features(gray))
@@ -225,90 +218,40 @@ def build_dataset(
     return np.asarray(images), np.asarray(labels), classes
 
 
-def train_model(
-    features: np.ndarray,
-    labels: np.ndarray,
-    cross_validation_folds: int,
-    svm_kernel: str,
-    use_gpu: bool,
-) -> Tuple[Pipeline, LabelEncoder, Dict[str, float], str, np.ndarray]:
+def train_model(features: np.ndarray, labels: np.ndarray, cross_validation_folds: int, svm_kernel: str, use_gpu: bool) -> Tuple[Pipeline, LabelEncoder, Dict[str, float], str, np.ndarray]:
     encoder = LabelEncoder()
     encoded_labels = encoder.fit_transform(labels)
     estimator = None
     if use_gpu:
         try:
-            from cuml.svm import LinearSVC as CuMLLinearSVC  # type: ignore
-            from cuml.svm import SVC as CuMLSVC  # type: ignore
+            from cuml.svm import LinearSVC as CuMLLinearSVC
+            from cuml.svm import SVC as CuMLSVC
         except ImportError:
             print("⚠️ 啟用 --use-gpu 但未安裝 cuML，改用 CPU 版 SVM。")
         else:
             if svm_kernel == "linear":
-                try:
-                    estimator = CuMLLinearSVC(class_weight="balanced")
-                except TypeError:
-                    estimator = CuMLLinearSVC()
+                try: estimator = CuMLLinearSVC(class_weight="balanced")
+                except TypeError: estimator = CuMLLinearSVC()
             else:
-                try:
-                    estimator = CuMLSVC(kernel="rbf", class_weight="balanced")
-                except TypeError:
-                    estimator = CuMLSVC(kernel="rbf")
+                try: estimator = CuMLSVC(kernel="rbf", class_weight="balanced")
+                except TypeError: estimator = CuMLSVC(kernel="rbf")
     if estimator is None:
-        if svm_kernel == "linear":
-            estimator = LinearSVC(class_weight="balanced", random_state=RANDOM_SEED)
-        else:
-            estimator = SVC(kernel="rbf", probability=True, class_weight="balanced", random_state=RANDOM_SEED)
+        if svm_kernel == "linear": estimator = LinearSVC(class_weight="balanced", random_state=RANDOM_SEED)
+        else: estimator = SVC(kernel="rbf", probability=True, class_weight="balanced", random_state=RANDOM_SEED)
     elif use_gpu:
         estimator = CuMLPredictWrapper(estimator)
-    pipeline = Pipeline(
-        [
-            ("scaler", StandardScaler(with_mean=False)),
-            ("svm", estimator),
-        ]
-    )
-    x_train, x_valid, y_train, y_valid = train_test_split(
-        features,
-        encoded_labels,
-        test_size=0.2,
-        random_state=RANDOM_SEED,
-        stratify=encoded_labels,
-    )
+    pipeline = Pipeline([("scaler", StandardScaler(with_mean=False)), ("svm", estimator)])
+    x_train, x_valid, y_train, y_valid = train_test_split(features, encoded_labels, test_size=0.2, random_state=RANDOM_SEED, stratify=encoded_labels)
     pipeline.fit(x_train, y_train)
     y_valid_pred = to_numpy(pipeline.predict(x_valid))
-    y_valid_labels = encoder.inverse_transform(y_valid)
-    y_valid_pred_labels = encoder.inverse_transform(y_valid_pred)
-    report_dict = classification_report(
-        y_valid_labels,
-        y_valid_pred_labels,
-        labels=encoder.classes_,
-        target_names=encoder.classes_,
-        zero_division=0,
-        output_dict=True,
-    )
-    report_text = classification_report(
-        y_valid_labels,
-        y_valid_pred_labels,
-        labels=encoder.classes_,
-        target_names=encoder.classes_,
-        digits=4,
-        zero_division=0,
-    )
-    conf_mat = confusion_matrix(
-        y_valid_labels,
-        y_valid_pred_labels,
-        labels=encoder.classes_,
-    )
+    report_dict = classification_report(encoder.inverse_transform(y_valid), encoder.inverse_transform(y_valid_pred), labels=encoder.classes_, target_names=encoder.classes_, zero_division=0, output_dict=True)
+    report_text = classification_report(encoder.inverse_transform(y_valid), encoder.inverse_transform(y_valid_pred), labels=encoder.classes_, target_names=encoder.classes_, digits=4, zero_division=0)
+    conf_mat = confusion_matrix(encoder.inverse_transform(y_valid), encoder.inverse_transform(y_valid_pred), labels=encoder.classes_)
     skf = StratifiedKFold(n_splits=cross_validation_folds, shuffle=True, random_state=RANDOM_SEED)
-    print(f"開始交叉驗證，共 {cross_validation_folds} 折，樣本數 {len(features)}")
     cv_scores = []
-    for fold_idx, (train_idx, test_idx) in enumerate(
-        tqdm(skf.split(features, encoded_labels), total=cross_validation_folds, desc="交叉驗證", unit="fold")
-    ):
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 開始第 {fold_idx + 1}/{cross_validation_folds} 折，訓練樣本 {len(train_idx)}，驗證樣本 {len(test_idx)}")
+    for train_idx, test_idx in tqdm(skf.split(features, encoded_labels), total=cross_validation_folds, desc="交叉驗證", unit="fold"):
         pipeline.fit(features[train_idx], encoded_labels[train_idx])
-        score = pipeline.score(features[test_idx], encoded_labels[test_idx])
-        cv_scores.append(score)
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 結束第 {fold_idx + 1}/{cross_validation_folds} 折，score={score:.4f}")
-    print("交叉驗證完成，開始全量訓練...")
+        cv_scores.append(pipeline.score(features[test_idx], encoded_labels[test_idx]))
     pipeline.fit(features, encoded_labels)
     metrics = {
         "validation_accuracy": float(report_dict["accuracy"]),
@@ -321,18 +264,12 @@ def train_model(
     return pipeline, encoder, metrics, report_text, conf_mat
 
 
-def dedup_circles(
-    circles: Sequence[Tuple[int, int, int]],
-    image_shape: Tuple[int, int, int],
-    dist_ratio: float,
-) -> List[Tuple[int, int, int]]:
-    """合併過度重疊的圓，避免一顆硬幣被計算多次。"""
-    if not circles:
-        return []
+def dedup_circles(circles: Sequence[Tuple[int, int, int]], image_shape: Tuple[int, int, int], dist_ratio: float) -> List[Tuple[int, int, int]]:
+    if not circles: return []
     min_dim = min(image_shape[:2])
     dist_thresh = max(1, int(min_dim * dist_ratio))
-    kept: List[Tuple[int, int, int]] = []
-    # HoughCircles 回傳的順序通常依據 accumulator 投票數 (信心度)，所以保留前面的通常較準
+    kept = []
+    # HoughCircles 回傳的通常依 accumulator 排序，信心高的在前
     for cx, cy, r in circles:
         is_dup = False
         for kx, ky, kr in kept:
@@ -347,18 +284,16 @@ def dedup_circles(
 def detect_coins(
     image: np.ndarray,
     dp: float = 1.2,
-    min_dist_ratio: float = 0.06,  # [修改] 縮小距離限制，避免漏掉相鄰硬幣
-    param1: float = 120,
-    param2: Union[float, Sequence[float]] = (50, 35, 20),  # [修改] 預設為多重掃描
-    min_radius_ratio: float = 0.05,  # [修改] 稍微放寬半徑下限
-    max_radius_ratio: float = 0.40,
-    median_ksize: int = 5,  # [修改] 加大模糊核以減少噪點
-    use_clahe: bool = True,  # [修改] 預設啟用 CLAHE 增強對比
+    min_dist_ratio: float = 0.03,  # [修正] 縮小 minDist 讓相鄰硬幣不被吃掉
+    param1: float = 120,           # [修正] 回調 Canny 門檻到 120，減少噪點干擾
+    param2: Union[float, Sequence[float]] = (35, 28),  # [修正] 移除太低的 15，避免過多假陽性
+    min_radius_ratio: float = 0.015, # [修正] 允許較小的硬幣 (1.5% 寬度)
+    max_radius_ratio: float = 0.15,  # [修正] 限制最大半徑 (15% 寬度)，杜絕超大圓
+    median_ksize: int = 5,           # [修正] 使用 5x5 模糊來平滑 CLAHE 帶來的噪點
+    use_clahe: bool = True, 
 ) -> List[Tuple[int, int, int]]:
     
     bgr = ensure_color(image)
-    
-    # [新增] 預處理：CLAHE 與 模糊
     if use_clahe:
         lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
@@ -366,46 +301,30 @@ def detect_coins(
         l = clahe.apply(l)
         lab = cv2.merge((l, a, b))
         bgr = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-        
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    
     if median_ksize and median_ksize % 2 == 1:
         gray = cv2.medianBlur(gray, median_ksize)
     
-    # 高斯模糊進一步降噪
-    gray = cv2.GaussianBlur(gray, (9, 9), 2)
+    # 稍微降噪
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
     
     min_dim = min(image.shape[:2])
     min_dist = max(15, int(min_dim * min_dist_ratio))
     min_radius = int(min_dim * min_radius_ratio)
     max_radius = int(min_dim * max_radius_ratio)
     
-    # [新增] 參數標準化：確保 param2 是列表
-    if isinstance(param2, (float, int)):
-        param2_list = [float(param2)]
-    else:
-        param2_list = list(param2)
+    if isinstance(param2, (float, int)): param2_list = [float(param2)]
+    else: param2_list = list(param2)
         
     all_circles = []
-    
-    # [新增] 多重掃描迴圈
     for p2 in param2_list:
         circles = cv2.HoughCircles(
-            gray,
-            cv2.HOUGH_GRADIENT,
-            dp=dp,
-            minDist=min_dist,
-            param1=param1,
-            param2=p2,
-            minRadius=min_radius,
-            maxRadius=max_radius,
+            gray, cv2.HOUGH_GRADIENT, dp=dp, minDist=min_dist,
+            param1=param1, param2=p2, minRadius=min_radius, maxRadius=max_radius,
         )
         if circles is not None:
-            # 轉換為整數並加入列表
             detected = [(int(x), int(y), int(r)) for x, y, r in circles[0]]
             all_circles.extend(detected)
-            
-    # 注意：這裡只回傳所有掃描到的圓，去重工作交給外部或下一步的 dedup_circles
     return all_circles
 
 
@@ -419,48 +338,38 @@ def crop_coin(image: np.ndarray, circle: Tuple[int, int, int], scale: float = 1.
     return image[y1:y2, x1:x2]
 
 
-def count_coins(
-    model: Pipeline,
-    image_paths: Sequence[Path],
-    target_size: Tuple[int, int],
-    label_order: Sequence[str],
-) -> Dict[str, Dict[str, int]]:
-    encoder: LabelEncoder = getattr(model, "label_encoder", None) or model.named_steps.get("label_encoder")  # type: ignore[assignment]
-    counts: Dict[str, Dict[str, int]] = {}
+def count_coins(model: Pipeline, image_paths: Sequence[Path], target_size: Tuple[int, int], label_order: Sequence[str]) -> Dict[str, Dict[str, int]]:
+    encoder = getattr(model, "label_encoder", None) or model.named_steps.get("label_encoder")
+    counts = {}
     for path in image_paths:
         image = cv2.imread(str(path))
-        if image is None:
-            continue
+        if image is None: continue
         image = ensure_color(image)
         
-        # [修改] 直接呼叫 detect_coins，現在它內部會自動執行多重掃描 + CLAHE
+        # 1. 偵測 (多參數掃描)
         circles = detect_coins(image)
-        
-        # 第一次去重：合併多重掃描的結果
+        # 2. 第一次去重 (範圍較小，合併重疊)
         circles = dedup_circles(circles, image.shape, dist_ratio=DEDUP_DIST_RATIO)
         
-        # 若圓太多 (可能是雜訊)，嘗試更激進的去重或半徑過濾
+        # 3. 若圓太多，進行二次嚴格去重
         if len(circles) > DEDUP_HEAVY_THRESHOLD:
             circles = dedup_circles(circles, image.shape, dist_ratio=DEDUP_DIST_RATIO_HEAVY)
             if circles:
                 radii = np.asarray([r for _, _, r in circles])
                 median_r = np.median(radii)
-                lower = int(max(1, 0.65 * median_r))  # [微調] 稍微放寬下限
-                upper = int(1.45 * median_r)          # [微調] 稍微放寬上限
+                lower, upper = int(max(1, 0.60 * median_r)), int(1.50 * median_r)
                 circles = [(x, y, r) for x, y, r in circles if lower <= r <= upper]
                 
-        coin_counter: Counter[str] = Counter()
+        coin_counter = Counter()
         for circle in circles:
             crop = crop_coin(image, circle, scale=CROP_SCALE_INFERENCE)
-            if crop.size == 0:
-                continue
+            if crop.size == 0: continue
             gray = preprocess_image(crop, target_size)
             features = extract_features(gray)
             prediction = to_numpy(model.predict([features]))[0]
             label = encoder.inverse_transform([prediction])[0]
             coin_counter[label] += 1
-        ordered_counts = {label: coin_counter.get(label, 0) for label in label_order}
-        counts[path.name] = ordered_counts
+        counts[path.name] = {label: coin_counter.get(label, 0) for label in label_order}
     return counts
 
 
@@ -472,30 +381,24 @@ def save_model(model: Pipeline, encoder: LabelEncoder, destination: Path) -> Non
 
 def load_model(path: Path) -> Tuple[Pipeline, LabelEncoder]:
     payload = joblib.load(path)
-    model: Pipeline = payload["model"]
-    encoder: LabelEncoder = payload["encoder"]
-    model.named_steps["label_encoder"] = encoder  # type: ignore[attr-defined]
-    model.label_encoder = encoder  # type: ignore[attr-defined]
+    model = payload["model"]
+    encoder = payload["encoder"]
+    model.named_steps["label_encoder"] = encoder
+    model.label_encoder = encoder
     return model, encoder
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="硬幣分類與計數 (HOG + LBP + SVM)")
-    parser.add_argument("--train-dir", type=Path, required=True, help="訓練資料夾，需依面值建立子資料夾")
-    parser.add_argument("--predict-dir", type=Path, help="要進行硬幣計數的影像資料夾")
-    parser.add_argument("--model-path", type=Path, default=Path("coin_svm.joblib"), help="模型儲存路徑")
-    parser.add_argument("--image-size", type=int, default=128, help="特徵提取時的影像邊長")
-    parser.add_argument("--augmentations-per-image", type=int, default=20, help="每張原圖生成的擴增數量")
+    parser.add_argument("--train-dir", type=Path, required=True, help="訓練資料夾")
+    parser.add_argument("--predict-dir", type=Path, help="推論影像資料夾")
+    parser.add_argument("--model-path", type=Path, default=Path("coin_svm.joblib"), help="模型路徑")
+    parser.add_argument("--image-size", type=int, default=128, help="影像尺寸")
+    parser.add_argument("--augmentations-per-image", type=int, default=20, help="擴增數量")
     parser.add_argument("--cv-folds", type=int, default=5, help="交叉驗證折數")
-    parser.add_argument(
-        "--svm-kernel",
-        type=str,
-        choices=["rbf", "linear"],
-        default="rbf",
-        help="選擇 SVM kernel，rbf 較準但較慢，linear 較快",
-    )
-    parser.add_argument("--skip-train", action="store_true", help="跳過訓練，直接使用 model-path 進行推論")
-    parser.add_argument("--use-gpu", action="store_true", help="若環境有 cuML，啟用 GPU SVM")
+    parser.add_argument("--svm-kernel", type=str, choices=["rbf", "linear"], default="rbf", help="SVM kernel")
+    parser.add_argument("--skip-train", action="store_true", help="跳過訓練")
+    parser.add_argument("--use-gpu", action="store_true", help="啟用 GPU")
     return parser.parse_args()
 
 
@@ -503,53 +406,25 @@ def main() -> None:
     args = parse_args()
     target_size = (args.image_size, args.image_size)
     if not args.skip_train:
-        features, labels, classes = build_dataset(
-            args.train_dir,
-            target_size,
-            args.augmentations_per_image,
-        )
-        model, encoder, metrics, report_text, conf_mat = train_model(
-            features,
-            labels,
-            cross_validation_folds=args.cv_folds,
-            svm_kernel=args.svm_kernel,
-            use_gpu=args.use_gpu,
-        )
+        features, labels, classes = build_dataset(args.train_dir, target_size, args.augmentations_per_image)
+        model, encoder, metrics, report_text, conf_mat = train_model(features, labels, args.cv_folds, args.svm_kernel, args.use_gpu)
         print("模型訓練完成。")
-        print(f"交叉驗證平均正確率: {metrics['cv_accuracy_mean']:.4f} ± {metrics['cv_accuracy_std']:.4f}")
+        print(f"交叉驗證平均正確率: {metrics['cv_accuracy_mean']:.4f}")
         print(f"驗證集 Accuracy: {metrics['validation_accuracy']:.4f}")
-        print(f"驗證集 Precision 平均: {metrics['validation_precision']:.4f}")
-        print(f"驗證集 Recall 平均: {metrics['validation_recall']:.4f}")
-        print(f"驗證集 F1 平均: {metrics['validation_f1']:.4f}")
-        print("驗證集分類報告:")
         print(report_text)
-        print("驗證集混淆矩陣 (列為真實標籤，行為預測標籤):")
-        print(conf_mat)
-        print(f"標籤順序: {', '.join(classes)}")
-        model.named_steps["label_encoder"] = encoder  # type: ignore[attr-defined]
-        model.label_encoder = encoder  # type: ignore[attr-defined]
+        model.named_steps["label_encoder"] = encoder
+        model.label_encoder = encoder
         save_model(model, encoder, args.model_path)
-        print(f"模型已儲存至: {args.model_path}")
     else:
         model, encoder = load_model(args.model_path)
         classes = list(encoder.classes_)
     if args.predict_dir:
-        if args.skip_train:
-            model, _ = load_model(args.model_path)
+        if args.skip_train: model, _ = load_model(args.model_path)
         image_paths = list(list_image_files(args.predict_dir))
-        if not image_paths:
-            print(f"{args.predict_dir} 內未找到影像。")
-            return
-        counts = count_coins(
-            model,
-            image_paths,
-            target_size,
-            label_order=classes,
-        )
-        for image_name, summary in counts.items():
+        counts = count_coins(model, image_paths, target_size, label_order=classes)
+        for name, summary in counts.items():
             readable = ", ".join(f"{label}: {count}" for label, count in summary.items())
-            print(f"{image_name}: {readable}")
-
+            print(f"{name}: {readable}")
 
 if __name__ == "__main__":
     main()

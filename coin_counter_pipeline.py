@@ -358,7 +358,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-path", type=Path, default=Path("coin_svm_v7.joblib"), help="模型路徑")
     parser.add_argument("--image-size", type=int, default=112, help="影像尺寸")
     parser.add_argument("--augmentations-per-image", type=int, default=10, help="擴增數量")
-    parser.add_argument("--cv-folds", type=int, default=5, help="交叉驗證折數")
+    parser.add_argument("--cv-folds", type=int, default=3, help="交叉驗證折數")
     parser.add_argument("--svm-kernel", type=str, choices=["rbf", "linear"], default="rbf", help="SVM kernel")
     parser.add_argument("--skip-train", action="store_true", help="跳過訓練")
     parser.add_argument("--use-gpu", action="store_true", help="啟用 GPU")

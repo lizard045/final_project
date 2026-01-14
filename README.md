@@ -11,6 +11,19 @@
 ```bash
 pip install opencv-python numpy scikit-image scikit-learn joblib
 ```
+## 執行docker環境應用GPU
+docker run -it --rm --gpus all -u root -v "C:/Users/snowy/OneDrive/桌面/Lizard/project/Coin_Recognisably/final_project:/workspace" -w /workspace rapidsai/base:23.10-cuda11.8-py3.10 bash
+
+pip install "numpy<1.25" "scikit-learn<1.4" "scikit-image<0.20" joblib "opencv-python<4.8"
+###
+numpy 1.24.x
+scikit-learn 1.3.x
+scikit-image 0.19.x
+cupy-cuda11x 12.x
+joblib 1.3.x
+apt-get update
+apt-get install -y libgl1 libglib2.0-0
+###
 
 > 若使用 Windows PowerShell，可改成 `python -m pip install ...` 以避免多個 Python 版本衝突。
 
@@ -21,11 +34,13 @@ pip install opencv-python numpy scikit-image scikit-learn joblib
 ```
 final_project/
 ├─ coin_counter_pipeline.py      # 訓練、推論與硬幣計數主流程
+├─ coin_extract_circles          # 霍夫轉換擷取硬幣資料
 ├─ coin_dataset_augment.py       # 單張硬幣影像資料擴增工具
 ├─ coin_evaluate.py              # 依簡報格式產生 out.txt 並計算 accuracy
 ├─ generate_in_file.py           # 從影像資料夾自動生成 in.txt
-├─ 錢幣預測試資料庫/             # 原始測試影像 (001.jpg ~ 010.jpg)
-├─ 錢幣預測試資料庫_augmented/   # 透過擴增腳本產生的影像
+├─ coin_datas/                   # 原始測試影像 (001.jpg ~ 010.jpg)
+├─ cropped_coins                 # 透過霍夫轉換擷取的硬幣
+├─ train_coins/                  # 訓練影像資料(1/5/10/50元)
 ├─ in.txt                        # 依簡報規格列出的影像清單 (可重新生成)
 └─ coin_svm.joblib               # 訓練後模型 (執行訓練流程後產生)
 ```
@@ -175,7 +190,7 @@ python generate_in_file.py ^
 
 ```bash
 python coin_evaluate.py ^
-  --image-dir "final_project/錢幣預測試資料庫_augmented" ^
+  --image-dir "final_project/coin_datas" ^
   --image-list "final_project/in.txt" ^
   --ground-truth "final_project/gt.txt" ^
   --model-path "final_project/coin_svm.joblib" ^

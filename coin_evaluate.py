@@ -3,8 +3,12 @@ from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
+import sys
 
 from coin_counter_pipeline import count_coins, load_model
+from coin_counter_pipeline import CuMLPredictWrapper  # 需要和訓練時同一實作
+   
+sys.modules["__main__"].CuMLPredictWrapper = CuMLPredictWrapper
 
 
 LABEL_ORDER_DEFAULT = ["1", "5", "10", "50"]
@@ -92,10 +96,15 @@ def evaluate(predictions: Sequence[Sequence[int]], ground_truth: Sequence[Sequen
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="硬幣計數結果產生與評估 (參考簡報格式)")
+    parser = argparse.ArgumentParser(description="硬幣計數結果產生與（可選）評估")
     parser.add_argument("--image-dir", type=Path, required=True, help="影像資料夾")
     parser.add_argument("--image-list", type=Path, required=True, help="in.txt 檔案位置")
-    parser.add_argument("--ground-truth", type=Path, required=True, help="gt.txt 檔案位置")
+    parser.add_argument(
+        "--ground-truth",
+        type=Path,
+        required=False,
+        help="gt.txt 檔案位置（可省略，省略則只產生 out.txt 不計分）",
+    )
     parser.add_argument("--model-path", type=Path, required=True, help="已訓練模型 coin_svm.joblib")
     parser.add_argument("--output-file", type=Path, default=Path("out.txt"), help="輸出 out.txt 檔案位置")
     parser.add_argument("--image-size", type=int, default=128, help="切圖片時的輸入尺寸")
@@ -127,20 +136,23 @@ def main() -> None:
         return
     write_counts_file(args.output_file, predictions)
     print(f"已輸出預測至 {args.output_file}")
-    gt_counts_map = read_counts_file(args.ground_truth)
-    ground_truth_rows = []
-    for idx, name in enumerate(valid_names):
-        key = str(idx)
-        counts = gt_counts_map.get(key)
-        if counts is None:
-            print(f"警告: gt.txt 未提供第 {idx} 筆 ({name}) 的標註，改填 0。")
-            counts = [0] * len(args.label_order)
-        ground_truth_rows.append(counts)
-    accuracy, per_image = evaluate(predictions, ground_truth_rows)
-    print("各影像得分:")
-    for name, score in zip(valid_names, per_image):
-        print(f"{name}: {score:.4f}")
-    print(f"整體 accuracy: {accuracy:.4f}")
+    if args.ground_truth:
+        gt_counts_map = read_counts_file(args.ground_truth)
+        ground_truth_rows = []
+        for idx, name in enumerate(valid_names):
+            key = str(idx)
+            counts = gt_counts_map.get(key)
+            if counts is None:
+                print(f"警告: gt.txt 未提供第 {idx} 筆 ({name}) 的標註，改填 0。")
+                counts = [0] * len(args.label_order)
+            ground_truth_rows.append(counts)
+        accuracy, per_image = evaluate(predictions, ground_truth_rows)
+        print("各影像得分:")
+        for name, score in zip(valid_names, per_image):
+            print(f"{name}: {score:.4f}")
+        print(f"整體 accuracy: {accuracy:.4f}")
+    else:
+        print("未提供 ground-truth，跳過評分。")
 
 
 if __name__ == "__main__":
